@@ -16,12 +16,11 @@
 
 Project N.O.M.A.D. is a self-contained, offline-first knowledge and education server packed with critical tools, knowledge, and AI to keep you informed and empowered — anytime, anywhere.
 
-## Installation & Quickstart
-Project N.O.M.A.D. can be installed on any Debian-based operating system (we recommend Ubuntu). Installation is completely terminal-based, and all tools and resources are designed to be accessed through the browser, so there's no need for a desktop environment if you'd rather setup N.O.M.A.D. as a "server" and access it through other clients.
+## Installation & Quickstart (macOS)
 
-*Note: sudo/root privileges are required to run the install script*
+This fork is designed for macOS with Apple Silicon. Prerequisites: [Docker Desktop](https://www.docker.com/products/docker-desktop/) and [Ollama](https://ollama.com/download) installed natively for Metal GPU acceleration.
 
-### Quick Install (Debian-based OS Only)
+### Quick Install (Debian-based OS)
 ```bash
 sudo apt-get update && \
 sudo apt-get install -y curl && \
@@ -30,7 +29,27 @@ curl -fsSL https://raw.githubusercontent.com/Crosstalk-Solutions/project-nomad/r
 sudo bash install_nomad.sh
 ```
 
-Project N.O.M.A.D. is now installed on your device! Open a browser and navigate to `http://localhost:8080` (or `http://DEVICE_IP:8080`) to start exploring!
+### Quick Install (macOS / Apple Silicon)
+```bash
+# Install dependencies
+brew install --cask docker
+brew install ollama gh
+
+# Clone this repo
+gh repo clone snfettig/project-nomad-macos-arm64
+cd project-nomad-macos-arm64
+
+# Start Ollama (if not already running)
+ollama serve &
+
+# Run the macOS install script
+bash install/install_nomad_macos.sh
+```
+
+Project N.O.M.A.D. is now installed on your Mac! Open a browser and navigate to `http://localhost:8080` to start exploring!
+
+#### Linux Install (upstream)
+For Debian/Ubuntu on x86_64, see the [upstream project](https://github.com/Crosstalk-Solutions/project-nomad) for the original install instructions.
 
 For a complete step-by-step walkthrough (including Ubuntu installation), see the [Installation Guide](https://www.projectnomad.us/install). For Windows users, see the [WSL2 install guide](https://www.projectnomad.us/install/wsl2) — community-supported path covering native Docker and Docker Desktop install routes.
 
@@ -68,29 +87,30 @@ N.O.M.A.D. also includes built-in tools like a Wikipedia content selector, ZIM l
 | Supply Depot | Built-in | One-click app catalog + bring-your-own custom Docker containers |
 
 ## Device Requirements
-While many similar offline survival computers are designed to be run on bare-minimum, lightweight hardware, Project N.O.M.A.D. is quite the opposite. To install and run the
-available AI tools, we highly encourage the use of a beefy, GPU-backed device to make the most of your install.
+
+> **macOS / Apple Silicon support:** This project includes support for running on **macOS / Apple Silicon (arm64)** with native **Metal GPU acceleration** via Ollama. The upstream project targets Debian/Ubuntu on x86_64 with NVIDIA GPUs. macOS-specific install scripts, multi-arch Docker image builds, and native Ollama integration allow Apple Silicon Macs to use their Metal GPU for local AI inference instead of running Ollama inside Docker (which has no GPU passthrough on macOS).
 
 At its core, however, N.O.M.A.D. is still very lightweight. For a barebones installation of the management application itself, the following minimal specs are required:
 
 *Note: Project N.O.M.A.D. is not sponsored by any hardware manufacturer and is designed to be as hardware-agnostic as possible. The hardware listed below is for example/comparison use only*
 
 #### Minimum Specs
-- Processor: 2 GHz dual-core processor or better
-- RAM: 4GB system memory
+- Processor: Apple M1 or later
+- RAM: 8 GB unified memory
 - Storage: At least 5 GB free disk space
-- OS: Debian-based (Ubuntu recommended)
+- OS: macOS 15 (Sequoia) or later
 - Stable internet connection (required during install only)
 
 To run LLMs and other included AI tools:
 
 #### Optimal Specs
-- Processor: AMD Ryzen 7 or Intel Core i7 or better
-- RAM: 32 GB system memory
-- Graphics: NVIDIA RTX 3060 or AMD equivalent or better (more VRAM = run larger models)
-- Storage: At least 250 GB free disk space (preferably on SSD)
-- OS: Debian-based (Ubuntu recommended)
+- A newer Apple Mac with Apple Silicon (M2 Pro / M3 Pro / M4 or better)
+- RAM: 32 GB unified memory or more (Apple Silicon shares memory between CPU and GPU — more RAM = larger AI models)
+- Storage: At least 250 GB free disk space (SSD standard on all Macs)
+- OS: macOS 26 or later
 - Stable internet connection (required during install only)
+
+*Tested on a MacBook Pro with M4 Max.*
 
 **For detailed build recommendations at three price points ($150–$1,000+), see the [Hardware Guide](https://www.projectnomad.us/hardware).**
 
@@ -170,28 +190,24 @@ It prints the resolved decision — current version, whether the clock is inside
 Project N.O.M.A.D. is licensed under the [Apache License 2.0](LICENSE).
 
 ## Helper Scripts
-Once installed, Project N.O.M.A.D. has a few helper scripts should you ever need to troubleshoot issues or perform maintenance that can't be done through the Command Center. All of these scripts are found in Project N.O.M.A.D.'s install directory, `/opt/project-nomad`
-
-###
+Once installed, Project N.O.M.A.D. has a few helper scripts for troubleshooting and maintenance. On macOS, these are located in `~/project-nomad-data/`:
 
 ###### Start Script - Starts all installed project containers
 ```bash
-sudo bash /opt/project-nomad/start_nomad.sh
+bash ~/project-nomad-data/start_nomad.sh
 ```
-###
 
 ###### Stop Script - Stops all installed project containers
 ```bash
-sudo bash /opt/project-nomad/stop_nomad.sh
+bash ~/project-nomad-data/stop_nomad.sh
 ```
-###
 
-###### Update Script - Attempts to pull the latest images for the Command Center and its dependencies (i.e. mysql) and recreate the containers. Note: this *only* updates the Command Center containers. It does not update the installable application containers - that should be done through the Command Center UI
+###### Update Script - Rebuilds the admin image from source and recreates containers
 ```bash
-sudo bash /opt/project-nomad/update_nomad.sh
+bash ~/project-nomad-data/update_nomad.sh
 ```
 
-###### Uninstall Script - Need to start fresh? Use the uninstall script to make your life easy. Note: this cannot be undone!
+###### Uninstall Script (Linux)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Crosstalk-Solutions/project-nomad/refs/heads/main/install/uninstall_nomad.sh -o uninstall_nomad.sh && sudo bash uninstall_nomad.sh
 ```
