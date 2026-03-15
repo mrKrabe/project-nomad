@@ -470,97 +470,137 @@ export class SystemService {
           os.kernel = dockerInfo.KernelVersion
         }
 
-        // si.graphics() in the admin container uses lspci (pciutils ships in
-        // the image for AMD detection). lspci has no real VRAM info for
-        // discrete GPUs, so systeminformation parses the first PCI memory
-        // Region (BAR0, typically 1-32 MiB) as `vram`. nvidia-smi / ROCm
-        // tooling enrichment also can't run since neither is in the admin
-        // image. No real dGPU has under 256 MiB, so any discrete-GPU controller
-        // below that threshold needs the probes below to give us real data.
-        // Applies to both NVIDIA and AMD; Intel iGPUs are exempt because their
-        // shared-system-memory VRAM reading via lspci can legitimately be small.
-        const DGPU_BOGUS_VRAM_THRESHOLD_MIB = 256
-        const isDiscreteGpuVendor = (vendor: string) =>
-          /nvidia|advanced micro devices|amd|ati/i.test(vendor)
-        const isBogusDgpuVram = (c: { vendor?: string; vram?: number | null }) =>
-          isDiscreteGpuVendor(c.vendor || '') &&
-          typeof c.vram === 'number' &&
-          c.vram < DGPU_BOGUS_VRAM_THRESHOLD_MIB
+        // Check for Apple Silicon (native Ollama with Metal GPU)
+        const isAppleSilicon =
+          (dockerInfo.Architecture === 'aarch64' && dockerInfo.OperatingSystem?.includes('Docker Desktop')) ||
+          (os.platform === 'darwin' && os.arch === 'arm64')
 
-        // Clear the bogus value up front. If a probe replaces the entry below
-        // we get the real VRAM; if no probe succeeds (Ollama not installed,
-        // passthrough_failed) the UI falls back to "N/A" instead of showing
-        // "1 MB" / "32 MB". The lspci model/vendor strings stay since they're
-        // still useful for identifying the card.
-        const hasLspciBogusDgpuVram = (graphics.controllers || []).some(isBogusDgpuVram)
-        if (hasLspciBogusDgpuVram) {
-          for (const c of graphics.controllers) {
-            if (isBogusDgpuVram(c)) c.vram = null
+        if (isAppleSilicon) {
+          gpuHealth.hasAppleMetal = true
+
+          // If native Ollama is configured, Metal GPU is accessible
+          if (DockerService.isNativeOllama()) {
+            gpuHealth.status = 'apple_metal'
+            gpuHealth.ollamaGpuAccessible = true
+
+            // Populate graphics controllers with Apple Silicon GPU info
+            if (!graphics.controllers || graphics.controllers.length === 0) {
+              // Get Apple GPU info from system_profiler via Docker host
+              try {
+                const { exec: execChild } = await import('child_process')
+                const { promisify } = await import('util')
+                const execAsync = promisify(execChild)
+                const { stdout } = await execAsync(
+                  'system_profiler SPDisplaysDataType 2>/dev/null | grep "Chipset Model" | sed "s/.*: //"'
+                )
+                const gpuModel = stdout.trim()
+                if (gpuModel) {
+                  graphics.controllers = [{
+                    model: gpuModel,
+                    vendor: 'Apple',
+                    bus: 'Built-In',
+                    vram: 0,
+                    vramDynamic: true,
+                  }]
+                }
+              } catch {
+                // Fallback — we're inside Docker, can't run system_profiler
+                graphics.controllers = [{
+                  model: 'Apple Silicon GPU (Metal)',
+                  vendor: 'Apple',
+                  bus: 'Built-In',
+                  vram: 0,
+                  vramDynamic: true,
+                }]
+              }
+            }
+          } else {
+            // Apple Silicon detected but Ollama is in Docker (no Metal access)
+            gpuHealth.status = 'no_gpu'
+            gpuHealth.ollamaGpuAccessible = false
           }
-        }
+        } else {
+          // Non-Apple: full NVIDIA/AMD detection with log parsing and probes
 
-        // Run the probes when controllers are empty (common inside Docker) or
-        // when lspci gave us bogus discrete-GPU BAR0 values that need replacing.
-        if (
-          !graphics.controllers ||
-          graphics.controllers.length === 0 ||
-          hasLspciBogusDgpuVram
-        ) {
-          const runtimes = dockerInfo.Runtimes || {}
-          gpuHealth.hasNvidiaRuntime = 'nvidia' in runtimes
+          // si.graphics() in the admin container uses lspci (pciutils ships in
+          // the image for AMD detection). lspci has no real VRAM info for
+          // discrete GPUs, so systeminformation parses the first PCI memory
+          // Region (BAR0, typically 1-32 MiB) as `vram`. nvidia-smi / ROCm
+          // tooling enrichment also can't run since neither is in the admin
+          // image. No real dGPU has under 256 MiB, so any discrete-GPU controller
+          // below that threshold needs the probes below to give us real data.
+          // Applies to both NVIDIA and AMD; Intel iGPUs are exempt because their
+          // shared-system-memory VRAM reading via lspci can legitimately be small.
+          const DGPU_BOGUS_VRAM_THRESHOLD_MIB = 256
+          const isDiscreteGpuVendor = (vendor: string) =>
+            /nvidia|advanced micro devices|amd|ati/i.test(vendor)
+          const isBogusDgpuVram = (c: { vendor?: string; vram?: number | null }) =>
+            isDiscreteGpuVendor(c.vendor || '') &&
+            typeof c.vram === 'number' &&
+            c.vram < DGPU_BOGUS_VRAM_THRESHOLD_MIB
 
-          // AMD doesn't register a Docker runtime. Detection sources, in priority order:
-          //   1. KV 'gpu.type' (set by DockerService._detectGPUType after first Ollama install)
-          //   2. Marker file at /app/storage/.nomad-gpu-type (written by install_nomad.sh)
-          // The marker file matters because the System page should reflect AMD presence
-          // even before AI Assistant has been installed for the first time.
-          let savedGpuType: string | null | undefined = await KVStore.getValue('gpu.type') as string | undefined
-          if (!savedGpuType) {
-            try {
-              savedGpuType = (await readFile('/app/storage/.nomad-gpu-type', 'utf8')).trim()
-            } catch {}
+          // Clear the bogus value up front. If a probe replaces the entry below
+          // we get the real VRAM; if no probe succeeds (Ollama not installed,
+          // passthrough_failed) the UI falls back to "N/A" instead of showing
+          // "1 MB" / "32 MB". The lspci model/vendor strings stay since they're
+          // still useful for identifying the card.
+          const hasLspciBogusDgpuVram = (graphics.controllers || []).some(isBogusDgpuVram)
+          if (hasLspciBogusDgpuVram) {
+            for (const c of graphics.controllers) {
+              if (isBogusDgpuVram(c)) c.vram = null
+            }
           }
-          const amdEnabledRaw = await KVStore.getValue('ai.amdGpuAcceleration')
-          const amdAccelerationEnabled = String(amdEnabledRaw) !== 'false'
-          gpuHealth.hasRocmRuntime = savedGpuType === 'amd' && amdAccelerationEnabled
 
-          if (gpuHealth.hasNvidiaRuntime || gpuHealth.hasRocmRuntime) {
-            gpuHealth.gpuVendor = gpuHealth.hasNvidiaRuntime ? 'nvidia' : 'amd'
+          // Run the probes when controllers are empty (common inside Docker) or
+          // when lspci gave us bogus discrete-GPU BAR0 values that need replacing.
+          if (
+            !graphics.controllers ||
+            graphics.controllers.length === 0 ||
+            hasLspciBogusDgpuVram
+          ) {
+            const runtimes = dockerInfo.Runtimes || {}
+            gpuHealth.hasNvidiaRuntime = 'nvidia' in runtimes
 
-            // Primary probe: Ollama log parsing — works for both vendors and catches silent fallback
-            const logInfo = await this.getOllamaInferenceComputeFromLogs()
-            if (logInfo) {
-              graphics.controllers = [
-                {
-                  model: logInfo.name,
-                  vendor: logInfo.library === 'CUDA' ? 'NVIDIA' : 'AMD',
-                  bus: '',
-                  vram: logInfo.vramMiB,
-                  vramDynamic: false,
-                },
-              ]
-              gpuHealth.status = 'ok'
-              gpuHealth.ollamaGpuAccessible = true
-            } else if (gpuHealth.hasNvidiaRuntime) {
-              // NVIDIA secondary path: nvidia-smi exec preserves prior behavior when
-              // the log parser hasn't seen a startup line yet (e.g. log rotation,
-              // very fresh container). Distinguishes "no Ollama container" from
-              // "container exists but GPU broken".
-              const nvidiaInfo = await this.getNvidiaSmiInfo()
-              if (Array.isArray(nvidiaInfo)) {
-                graphics.controllers = nvidiaInfo.map((gpu) => ({
-                  model: gpu.model,
-                  vendor: gpu.vendor,
-                  bus: '',
-                  vram: gpu.vram,
-                  vramDynamic: false,
-                }))
+            // AMD doesn't register a Docker runtime. Detection sources, in priority order:
+            //   1. KV 'gpu.type' (set by DockerService._detectGPUType after first Ollama install)
+            //   2. Marker file at /app/storage/.nomad-gpu-type (written by install_nomad.sh)
+            // The marker file matters because the System page should reflect AMD presence
+            // even before AI Assistant has been installed for the first time.
+            let savedGpuType: string | null | undefined = await KVStore.getValue('gpu.type') as string | undefined
+            if (!savedGpuType) {
+              try {
+                savedGpuType = (await readFile('/app/storage/.nomad-gpu-type', 'utf8')).trim()
+              } catch {}
+            }
+            const amdEnabledRaw = await KVStore.getValue('ai.amdGpuAcceleration')
+            const amdAccelerationEnabled = String(amdEnabledRaw) !== 'false'
+            gpuHealth.hasRocmRuntime = savedGpuType === 'amd' && amdAccelerationEnabled
+
+            if (gpuHealth.hasNvidiaRuntime || gpuHealth.hasRocmRuntime) {
+              gpuHealth.gpuVendor = gpuHealth.hasNvidiaRuntime ? 'nvidia' : 'amd'
+
+              // Primary probe: Ollama log parsing — works for both vendors and catches silent fallback
+              const logInfo = await this.getOllamaInferenceComputeFromLogs()
+              if (logInfo) {
+                graphics.controllers = [
+                  {
+                    model: logInfo.name,
+                    vendor: logInfo.library === 'CUDA' ? 'NVIDIA' : 'AMD',
+                    bus: '',
+                    vram: logInfo.vramMiB,
+                    vramDynamic: false,
+                  },
+                ]
                 gpuHealth.status = 'ok'
                 gpuHealth.ollamaGpuAccessible = true
-              } else if (nvidiaInfo === 'OLLAMA_NOT_FOUND') {
-                const externalOllamaGpu = await this.getExternalOllamaGpuInfo()
-                if (externalOllamaGpu) {
-                  graphics.controllers = externalOllamaGpu.map((gpu) => ({
+              } else if (gpuHealth.hasNvidiaRuntime) {
+                // NVIDIA secondary path: nvidia-smi exec preserves prior behavior when
+                // the log parser hasn't seen a startup line yet (e.g. log rotation,
+                // very fresh container). Distinguishes "no Ollama container" from
+                // "container exists but GPU broken".
+                const nvidiaInfo = await this.getNvidiaSmiInfo()
+                if (Array.isArray(nvidiaInfo)) {
+                  graphics.controllers = nvidiaInfo.map((gpu) => ({
                     model: gpu.model,
                     vendor: gpu.vendor,
                     bus: '',
@@ -569,62 +609,71 @@ export class SystemService {
                   }))
                   gpuHealth.status = 'ok'
                   gpuHealth.ollamaGpuAccessible = true
+                } else if (nvidiaInfo === 'OLLAMA_NOT_FOUND') {
+                  const externalOllamaGpu = await this.getExternalOllamaGpuInfo()
+                  if (externalOllamaGpu) {
+                    graphics.controllers = externalOllamaGpu.map((gpu) => ({
+                      model: gpu.model,
+                      vendor: gpu.vendor,
+                      bus: '',
+                      vram: gpu.vram,
+                      vramDynamic: false,
+                    }))
+                    gpuHealth.status = 'ok'
+                    gpuHealth.ollamaGpuAccessible = true
+                  } else {
+                    gpuHealth.status = 'ollama_not_installed'
+                  }
                 } else {
-                  gpuHealth.status = 'ollama_not_installed'
+                  const externalOllamaGpu = await this.getExternalOllamaGpuInfo()
+                  if (externalOllamaGpu) {
+                    graphics.controllers = externalOllamaGpu.map((gpu) => ({
+                      model: gpu.model,
+                      vendor: gpu.vendor,
+                      bus: '',
+                      vram: gpu.vram,
+                      vramDynamic: false,
+                    }))
+                    gpuHealth.status = 'ok'
+                    gpuHealth.ollamaGpuAccessible = true
+                  } else {
+                    gpuHealth.status = 'passthrough_failed'
+                    logger.warn(
+                      `NVIDIA runtime detected but GPU passthrough failed: ${typeof nvidiaInfo === 'string' ? nvidiaInfo : JSON.stringify(nvidiaInfo)}`
+                    )
+                  }
                 }
               } else {
-                const externalOllamaGpu = await this.getExternalOllamaGpuInfo()
-                if (externalOllamaGpu) {
-                  graphics.controllers = externalOllamaGpu.map((gpu) => ({
-                    model: gpu.model,
-                    vendor: gpu.vendor,
-                    bus: '',
-                    vram: gpu.vram,
-                    vramDynamic: false,
-                  }))
-                  gpuHealth.status = 'ok'
-                  gpuHealth.ollamaGpuAccessible = true
+                // AMD path: no nvidia-smi equivalent worth running — log parser is authoritative.
+                // Distinguish "Ollama not running" from "Ollama running but no GPU log line".
+                const containers = await this.dockerService.docker.listContainers({ all: false })
+                const ollamaRunning = containers.some((c) =>
+                  c.Names.includes(`/${SERVICE_NAMES.OLLAMA}`)
+                )
+                if (!ollamaRunning) {
+                  const externalOllamaGpu = await this.getExternalOllamaGpuInfo()
+                  if (externalOllamaGpu) {
+                    graphics.controllers = externalOllamaGpu.map((gpu) => ({
+                      model: gpu.model,
+                      vendor: gpu.vendor,
+                      bus: '',
+                      vram: gpu.vram,
+                      vramDynamic: false,
+                    }))
+                    gpuHealth.status = 'ok'
+                    gpuHealth.ollamaGpuAccessible = true
+                  } else {
+                    gpuHealth.status = 'ollama_not_installed'
+                  }
                 } else {
                   gpuHealth.status = 'passthrough_failed'
                   logger.warn(
-                    `NVIDIA runtime detected but GPU passthrough failed: ${typeof nvidiaInfo === 'string' ? nvidiaInfo : JSON.stringify(nvidiaInfo)}`
+                    'AMD GPU detected but Ollama logs show no ROCm initialization — passthrough or HSA override may have failed'
                   )
                 }
               }
-            } else {
-              // AMD path: no nvidia-smi equivalent worth running — log parser is authoritative.
-              // Distinguish "Ollama not running" from "Ollama running but no GPU log line".
-              const containers = await this.dockerService.docker.listContainers({ all: false })
-              const ollamaRunning = containers.some((c) =>
-                c.Names.includes(`/${SERVICE_NAMES.OLLAMA}`)
-              )
-              if (!ollamaRunning) {
-                const externalOllamaGpu = await this.getExternalOllamaGpuInfo()
-                if (externalOllamaGpu) {
-                  graphics.controllers = externalOllamaGpu.map((gpu) => ({
-                    model: gpu.model,
-                    vendor: gpu.vendor,
-                    bus: '',
-                    vram: gpu.vram,
-                    vramDynamic: false,
-                  }))
-                  gpuHealth.status = 'ok'
-                  gpuHealth.ollamaGpuAccessible = true
-                } else {
-                  gpuHealth.status = 'ollama_not_installed'
-                }
-              } else {
-                gpuHealth.status = 'passthrough_failed'
-                logger.warn(
-                  'AMD GPU detected but Ollama logs show no ROCm initialization — passthrough or HSA override may have failed'
-                )
-              }
             }
           }
-        } else {
-          // si.graphics() returned controllers (host install, not Docker) — GPU is working
-          gpuHealth.status = 'ok'
-          gpuHealth.ollamaGpuAccessible = true
         }
       } catch {
         // Docker info query failed, skip host-level enrichment
@@ -909,6 +958,11 @@ export class SystemService {
       const serviceStatusList = await this.dockerService.getServicesStatus()
 
       for (const service of allServices) {
+        // Skip sync for native Ollama — it has no Docker container
+        if (service.service_name === SERVICE_NAMES.OLLAMA && DockerService.isNativeOllama()) {
+          continue
+        }
+
         const containerExists = serviceStatusList.find(
           (s) => s.service_name === service.service_name
         )
