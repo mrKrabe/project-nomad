@@ -167,8 +167,26 @@ create_nomad_directory() {
     echo -e "${GREEN}#${RESET} Directory $NOMAD_DIR already exists.\\n"
   fi
 
+  chmod -R 777 "${NOMAD_DIR}/storage"
   mkdir -p "${NOMAD_DIR}/storage/logs"
   touch "${NOMAD_DIR}/storage/logs/admin.log"
+
+
+  # Pre-create data directories so Docker doesn't create them as root.
+  # redis:7-alpine runs as UID 999 (redis user) and needs write access.
+  mkdir -p "${NOMAD_DIR}/redis"
+  chmod 777 "${NOMAD_DIR}/redis"
+
+  # mysql:8.0 only applies MYSQL_USER/MYSQL_PASSWORD env vars on first
+  # initialization (when /var/lib/mysql is empty). If a previous failed install
+  # left data behind, MySQL ignores the new credentials and the admin container
+  # gets "Access denied". Wipe the directory so re-runs get a clean init.
+  if [[ -d "${NOMAD_DIR}/mysql" ]] && [[ -n "$(ls -A "${NOMAD_DIR}/mysql" 2>/dev/null)" ]]; then
+    echo -e "${YELLOW}#${RESET} Clearing stale MySQL data directory to ensure fresh credential initialization...\\n"
+    rm -rf "${NOMAD_DIR}/mysql"
+  fi
+  mkdir -p "${NOMAD_DIR}/mysql"
+  chmod 777 "${NOMAD_DIR}/mysql"
 }
 
 copy_compose_file() {
